@@ -1,0 +1,613 @@
+<!doctype html>
+<html lang="vi">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Perlin Noise Mountains — Three.js r128</title>
+    <style>
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            background: #0b1020;
+            color: #e7f2ff;
+            font-family: system-ui, Roboto, sans-serif;
+        }
+
+        #app {
+            position: fixed;
+            inset: 0;
+        }
+
+        .badge {
+            position: fixed;
+            left: 12px;
+            bottom: 12px;
+            padding: 6px 6px;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            backdrop-filter: blur(8px);
+            border-radius: 10px;
+            font-size: 10px;
+        }
+    </style>
+
+    <!-- Three.js / Controls / dat.GUI -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/objects/Water.js"></script>
+    <script src="https://kaycy2k2.github.io/Terrain/TerrainPerlin.js"></script>
+    <script src="https://kaycy2k2.github.io/Terrain/RainEffect.js"></script>
+    <script src="https://kaycy2k2.github.io/Terrain/TerrainColors.js"></script>
+</head>
+
+<body>
+    <div id="app"></div>
+    <div class="badge">Perlin Mountains • Three.js r128</div>
+    <canvas id="minimap" width="100" height="100"
+        style="position: absolute; right: 20px; bottom: 20px; border:1px solid #fff; background:#111; cursor:pointer;"></canvas>
+
+    <script>
+
+        // ===== Three.js setup =====
+        const app = document.getElementById('app');
+        const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.shadowMap.enabled = true;
+        app.appendChild(renderer.domElement);
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0b1020);
+
+        const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 5000);
+        camera.position.set(300, 260, 300);
+        scene.add(camera);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.maxPolarAngle = Math.PI * 0.495;
+
+        // Lights
+        const hemi = new THREE.HemisphereLight(0x7aa6ff, 0x2e2e2e, 0.7);
+        scene.add(hemi);
+
+        const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+        dir.position.set(-300, 400, 200);
+        dir.castShadow = true;
+        dir.shadow.mapSize.set(2048, 2048);
+        const d = 500;
+        dir.shadow.camera.left = -d; dir.shadow.camera.right = d;
+        dir.shadow.camera.top = d; dir.shadow.camera.bottom = -d;
+        scene.add(dir);
+
+        // Ground (receive shadow)
+        const ground = new THREE.Mesh(
+            new THREE.PlaneBufferGeometry(4000, 4000),
+            new THREE.ShadowMaterial({ opacity: 0.15 })
+        );
+        ground.rotation.x = -Math.PI / 2;
+        ground.position.y = -1;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        // ===== Terrain params & GUI =====
+        const params = {
+            width: 600, depth: 600, // kích thước mặt phẳng
+            segments: 256,          // độ phân giải (256 x 256)
+            amplitude: 80,          // biên độ đồi núi
+            frequency: 0.0035,      // tần số cơ sở (scale)
+            octaves: 5,             // số tầng fBm
+            lacunarity: 2.0,        // nhân tần số mỗi tầng
+            gain: 0.5,              // giảm biên độ mỗi tầng
+            seed: 1337,             // seed để tái tạo
+            wireframe: false,
+            flatShading: true,
+            metalness: 0.1,
+            roughness: 0.95,
+            autoRotate: false,
+            showMinimap: false,
+            // thêm vào params
+            rain: false,
+            flow: false,            // làm địa hình “chảy” theo thời gian
+            flowSpeed: 0.08,        // tốc độ "chảy"
+            elevationBias: 0.0,     // đẩy toàn bộ cao độ lên/xuống
+            waterHeight: 0,   // cao độ mặt nước so với gốc toạ độ Y
+            Regenerate: () => buildTerrain(true)
+        };
+
+        const texLoader = new THREE.TextureLoader();
+        params.texture = texLoader.load('https://threejs.org/examples/textures/terrain/grasslight-big.jpg');
+
+        // Nút chọn ảnh
+        const fileInput = document.createElement("input");
+        fileInput.type = "file";
+        fileInput.accept = ".image/*";
+        fileInput.style.display = "none";
+        document.body.appendChild(fileInput);
+        fileInput.addEventListener("change", (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const url = URL.createObjectURL(file);
+            const loader = new THREE.TextureLoader();
+            loader.load(url, (texture) => {
+                texture.wrapS = THREE.ClampToEdgeWrapping;
+                texture.wrapT = THREE.ClampToEdgeWrapping;
+                texture.minFilter = THREE.LinearFilter;
+
+                const imgWidth = texture.image.width;
+                const imgHeight = texture.image.height;
+                const aspect = imgWidth / imgHeight;
+
+                const planeWidth = params.width;
+                const planeHeight = params.depth;
+                const planeAspect = planeWidth / planeHeight;
+
+                if (aspect > planeAspect) {
+                    // Ảnh rộng hơn plane
+                    const scale = planeAspect / aspect;
+                    texture.repeat.set(1, scale);
+                    texture.offset.set(0, (1 - scale) / 2);
+                } else {
+                    // Ảnh cao hơn plane
+                    const scale = aspect / planeAspect;
+                    texture.repeat.set(scale, 1);
+                    texture.offset.set((1 - scale) / 2, 0);
+                }
+
+                terrainMat.map = texture;
+                terrainMat.needsUpdate = true;
+            });
+        });
+        // === Ripple system ===
+        let ripples = [];
+
+        function createRipple(x, z) {
+            const geom = new THREE.RingGeometry(0.1, 0.15, 32);
+            const mat = new THREE.MeshBasicMaterial({
+                color: 0x66ccff,
+                transparent: true,
+                opacity: 0.5,
+                side: THREE.DoubleSide
+            });
+            const ripple = new THREE.Mesh(geom, mat);
+            ripple.rotation.x = -Math.PI / 2; // nằm ngang
+            ripple.position.set(x, params.waterHeight + 0.2, z);
+            ripple.userData = { scale: 0.1, life: 1.0 }; // scale ban đầu, độ sống
+            scene.add(ripple);
+            ripples.push(ripple);
+        }
+
+        // Cập nhật ripple trong tick()
+        function updateRipples(delta) {
+            for (let i = ripples.length - 1; i >= 0; i--) {
+                const r = ripples[i];
+                r.userData.scale += 1.5 * delta; // tốc độ nở
+                r.scale.set(r.userData.scale, r.userData.scale, 1);
+
+                r.userData.life -= 0.5 * delta; // mờ dần
+                r.material.opacity = r.userData.life * 0.5;
+
+                if (r.userData.life <= 0) {
+                    scene.remove(r);
+                    ripples.splice(i, 1);
+                }
+            }
+        }
+
+        let rain;
+        rain = new RainEffect(scene, {
+            rainCount: 1000,
+            width: params.width,
+            depth: params.depth,
+            color: 0x66ccff,
+            size: 2,
+            heightMin: 100,
+            heightMax: 500
+        });
+        //rain.createRain();
+
+        let perlin = new TerrainPerlin(params.seed);
+        let terrain, terrainGeom, terrainMat, terrainColors;
+        let time = 0;
+        let water;
+
+        function buildTerrain(newSeed = false) {
+            if (newSeed) {
+                params.seed = Math.floor(Math.random() * 1e9) >>> 0;
+                perlin = new TerrainPerlin(params.seed);
+            }
+            // Dispose old
+            if (terrain) {
+                terrain.geometry.dispose();
+                terrain.material.dispose();
+                scene.remove(terrain);
+            }
+            terrainGeom = new THREE.PlaneBufferGeometry(params.width, params.depth, params.segments, params.segments);
+            terrainGeom.rotateX(-Math.PI / 2);
+
+            // Tạo mảng màu cho từng vertex
+            const colors = [];
+            const position = terrainGeom.attributes.position;
+            for (let i = 0; i < position.count; i++) {
+                const y = position.getY(i); // dùng cao độ Y sau khi updateHeights
+                let color;
+                if (y < params.waterHeight) {
+                    color = new THREE.Color(0x003333);
+                } else {
+                    color = new THREE.Color(0xffffff);
+                }
+                colors.push(color.r, color.g, color.b);
+            }
+
+            terrainGeom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+            terrainMat = new THREE.MeshStandardMaterial({
+                flatShading: params.flatShading,
+                wireframe: params.wireframe,
+                metalness: params.metalness,
+                roughness: params.roughness,
+                vertexColors: true   // bật dùng màu theo vertex
+            });
+
+
+            if (params.texture) {
+                terrainMat.map = params.texture;
+                terrainMat.map.wrapS = terrainMat.map.wrapT = THREE.RepeatWrapping;
+                terrainMat.map.repeat.set(8, 8);
+            }
+
+            terrain = new THREE.Mesh(terrainGeom, terrainMat);
+            terrain.castShadow = true;
+            terrain.receiveShadow = true;
+            scene.add(terrain);
+
+            // Gradient background
+            const canvas = document.createElement("canvas");
+            canvas.width = 1;
+            canvas.height = 256;
+            const ctx = canvas.getContext("2d");
+
+            // Tạo gradient từ xanh nhạt -> xanh đậm
+            const gradient = ctx.createLinearGradient(0, 0, 0, 256);
+            gradient.addColorStop(0, "#87ceeb");  // xanh trời
+            gradient.addColorStop(1, "#00111a");  // xanh đậm gần chân trời
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, 1, 256);
+
+            const skyTexture = new THREE.CanvasTexture(canvas);
+            scene.background = skyTexture;
+
+            // Nước
+            if (water) {
+                water.geometry.dispose();
+                water.material.dispose();
+                scene.remove(water);
+                water = null;
+            }
+            const waterGeom = new THREE.BoxGeometry(params.width, params.depth);
+            water = new THREE.Water(waterGeom, {
+                textureWidth: 512,
+                textureHeight: 512,
+                waterNormals: new THREE.TextureLoader().load(
+                    "https://threejs.org/examples/textures/waternormals.jpg",
+                    function (texture) {
+                        texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+                    }
+                ),
+                alpha: 1.0,
+                sunDirection: dir.position.clone().normalize(),
+                sunColor: 0xffffff,
+                waterColor: 0x001e0f,
+                distortionScale: 3.7,
+                fog: scene.fog !== undefined
+            });
+            water.rotation.x = -Math.PI / 2;      // đặt nằm ngang
+            water.position.y = params.waterHeight; // cao độ mặt nước
+            scene.add(water);
+
+            updateHeights(0);
+            terrainColors = new TerrainColors(terrainGeom, params);
+            terrainColors.updateColors();
+
+        }
+
+
+        function updateHeights(t) {
+            const pos = terrainGeom.attributes.position;
+            const arr = pos.array;
+
+            // Lấy thông tin lưới
+            const segX = params.segments;
+            const segZ = params.segments;
+            const halfW = params.width * 0.5;
+            const halfD = params.depth * 0.5;
+
+            // offset “flow” theo thời gian
+            const tOffset = params.flow ? t * params.flowSpeed : 0;
+
+            // Duyệt từng đỉnh: PlaneBufferGeometry sinh đỉnh theo trật tự đều
+            for (let iz = 0; iz <= segZ; iz++) {
+                for (let ix = 0; ix <= segX; ix++) {
+                    const i = ix + iz * (segX + 1);
+                    const i3 = i * 3;
+
+                    const x = arr[i3 + 0];
+                    const z = arr[i3 + 2];
+
+                    // Đưa x,z về không gian noise [dựa tần số]
+                    const nx = (x + tOffset * 80) * params.frequency;
+                    const nz = (z + tOffset * 80) * params.frequency;
+
+                    // fBm Perlin
+                    let h = perlin.fbm(nx, nz, params.octaves, params.lacunarity, params.gain);
+                    // Nhấn mạnh đỉnh, nén đáy (mềm hơn)
+                    h = Math.sign(h) * Math.pow(Math.abs(h), 1.2);
+
+                    const y = h * params.amplitude + params.elevationBias;
+                    arr[i3 + 1] = y;
+                }
+            }
+
+            pos.needsUpdate = true;
+            terrainGeom.computeVertexNormals();
+            terrainGeom.normalsNeedUpdate = true;
+        }
+
+        // GUI
+        const gui = new dat.GUI();
+        const fTerrain = gui.addFolder('Terrain');
+        fTerrain.add(params, 'width', 100, 2000, 10).onFinishChange(() => buildTerrain(false));
+        fTerrain.add(params, 'depth', 100, 2000, 10).onFinishChange(() => buildTerrain(false));
+        fTerrain.add(params, 'segments', 32, 1024, 1).onFinishChange(() => buildTerrain(false));
+        fTerrain.add(params, 'amplitude', 1, 1000, 1).onFinishChange(() => buildTerrain(false));
+        fTerrain.add(params, 'frequency', 0.0005, 0.02, 0.0001).onFinishChange(() => buildTerrain(false));
+        fTerrain.add(params, 'octaves', 1, 8, 1).onFinishChange(() => buildTerrain(false));
+        fTerrain.add(params, 'lacunarity', 1.5, 3.5, 0.1).onFinishChange(() => buildTerrain(false));
+        fTerrain.add(params, 'gain', 0.2, 0.9, 0.01).onFinishChange(() => buildTerrain(false));
+        fTerrain.add(params, 'elevationBias', -100, 100, 1).onChange(v => {
+            updateHeights(time);
+            terrainColors.updateColors();
+        });
+        fTerrain.add(params, 'waterHeight', -100, 300, 1).onChange(v => {
+            if (water) water.position.y = v;
+            terrainColors.updateColors();
+        });
+        fTerrain.add(params, 'Regenerate');
+
+        const fMat = gui.addFolder('Material');
+        fMat.add(params, 'wireframe').onChange(v => { terrainMat.wireframe = v; terrainMat.needsUpdate = true; });
+        fMat.add(params, 'flatShading').onChange(v => { terrainMat.flatShading = v; terrainMat.needsUpdate = true; buildTerrain(false); });
+        fMat.add(params, 'metalness', 0, 1, 0.01).onChange(v => terrainMat.metalness = v);
+        fMat.add(params, 'roughness', 0, 1, 0.01).onChange(v => terrainMat.roughness = v);
+        fMat.add({ useTexture: true }, 'useTexture').name('Use Texture').onChange(v => {
+            if (v) {
+                terrainMat.map = params.texture;
+                terrainMat.map.wrapS = terrainMat.map.wrapT = THREE.RepeatWrapping;
+                terrainMat.map.repeat.set(8, 8);
+            } else {
+                terrainMat.map = null;
+            }
+            terrainMat.needsUpdate = true;
+        });
+
+
+        fMat.add({ chooseTexture: () => fileInput.click() }, 'chooseTexture').name("Choose Texture");
+
+        // GUI toggle
+        const fWeather = gui.addFolder("Weather");
+        fWeather.add(params, "rain").name("Rain").onChange(v => {
+            if (v) {
+                if (!rain.rainGroup) rain.createRain();
+                rain.setVisible(true);
+            } else {
+                rain.setVisible(false);
+            }
+        });
+
+        const fView = gui.addFolder('View');
+        fView.add(params, 'autoRotate');
+        fView.add(params, 'flow');
+        fView.add(params, 'flowSpeed', 0.0, 0.6, 0.01);
+        fView.add(params, 'showMinimap').name("Show Minimap").onChange(v => {
+            minimap.style.display = v ? "block" : "none";
+        });
+
+        // Nút chụp ảnh
+        const fCapture = gui.addFolder("Capture");
+        fCapture.add({
+            screenshot: () => {
+                renderer.render(scene, camera); // đảm bảo render frame mới nhất
+                renderer.domElement.toBlob((blob) => {
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = "terrain_screenshot.png";
+                    a.click();
+                    URL.revokeObjectURL(url);
+                });
+            }
+        }, 'screenshot').name("Take Screenshot");
+        // Thêm vào GUI Capture hoặc tạo folder riêng
+        fCapture.add({
+            downloadParams: () => {
+                // Tạo bản sao các thông số quan trọng
+                const exportParams = { ...params };
+                // Loại bỏ các hàm khỏi export
+                Object.keys(exportParams).forEach(key => {
+                    if (typeof exportParams[key] === "function") delete exportParams[key];
+                });
+                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(exportParams, null, 2));
+                const a = document.createElement("a");
+                a.href = dataStr;
+                a.download = "terrain_params.json";
+                a.click();
+            }
+        }, 'downloadParams').name("Download Params");
+        // Tạo input file ẩn
+        const jsonInput = document.createElement("input");
+        jsonInput.type = "file";
+        jsonInput.accept = ".json";
+        jsonInput.style.display = "none";
+        document.body.appendChild(jsonInput);
+
+        // Thêm nút vào GUI để chọn tệp JSON
+        fCapture.add({
+            loadParams: () => jsonInput.click()
+        }, 'loadParams').name("Load Params");
+
+        // Xử lý khi người dùng chọn tệp
+        jsonInput.addEventListener("change", (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                try {
+                    const loadedParams = JSON.parse(event.target.result);
+
+                    // Cập nhật params, bỏ qua texture
+                    Object.keys(loadedParams).forEach(key => {
+                        if (key === "texture") return; // bỏ qua
+                        if (key in params) params[key] = loadedParams[key];
+                    });
+
+                    // Cập nhật GUI
+                    for (let i in gui.__folders) {
+                        const folder = gui.__folders[i];
+                        folder.__controllers.forEach(ctrl => {
+                            if (ctrl.property in loadedParams) ctrl.setValue(loadedParams[ctrl.property]);
+                        });
+                    }
+
+                    // Nếu JSON có texture.image, thử load texture
+                    if (loadedParams.texture && loadedParams.texture.image) {
+                        const imgId = loadedParams.texture.image; // hoặc đổi thành URL nếu bạn có
+                        const loader = new THREE.TextureLoader();
+                        loader.load(imgId, (texture) => {
+                            texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+                            terrainMat.map = texture;
+                            terrainMat.needsUpdate = true;
+                        });
+                    }
+
+                    buildTerrain(false);
+                    if (params.waterHeight && water) water.position.y = params.waterHeight;
+
+                } catch (err) {
+                    alert("File JSON không hợp lệ: " + err.message);
+                }
+            };
+
+            reader.readAsText(file);
+        });
+
+        // Build first terrain
+        buildTerrain(false);
+
+        // Handle resize
+        addEventListener('resize', () => {
+            camera.aspect = innerWidth / innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(innerWidth, innerHeight);
+        });
+        // ===== Mini Map =====
+        const minimap = document.getElementById("minimap");
+        minimap.style.display = "none"; // 🚩 ẩn ngay từ đầu
+        const ctxMap = minimap.getContext("2d");
+
+        let isDraggingMini = false;
+        let cameraTargetPos = new THREE.Vector3();
+        let isCameraMoving = false;
+
+        // Vẽ minimap
+        function drawMinimap() {
+            ctxMap.clearRect(0, 0, minimap.width, minimap.height);
+
+            // Vẽ biên địa hình
+            ctxMap.strokeStyle = "#0f0";
+            ctxMap.strokeRect(0, 0, minimap.width, minimap.height);
+
+            // Vẽ marker camera
+            const camX = (camera.position.x / params.width + 0.5) * minimap.width;
+            const camZ = (camera.position.z / params.depth + 0.5) * minimap.height;
+
+            ctxMap.fillStyle = "red";
+            ctxMap.beginPath();
+            ctxMap.arc(camX, camZ, 5, 0, Math.PI * 2);
+            ctxMap.fill();
+        }
+
+        // Chuyển đổi click trên minimap thành vị trí camera
+        function setCameraFromMinimap(mx, my) {
+            const nx = mx / minimap.width - 0.5;
+            const nz = my / minimap.height - 0.5;
+
+            cameraTargetPos.set(nx * params.width, camera.position.y, nz * params.depth);
+            isCameraMoving = true; // bật flag để bắt đầu lerp
+        }
+
+
+        minimap.addEventListener("mousedown", (e) => {
+            isDraggingMini = true;
+            const rect = minimap.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            setCameraFromMinimap(x, y);
+        });
+
+        minimap.addEventListener("mousemove", (e) => {
+            if (isCameraMoving) {
+                camera.position.lerp(cameraTargetPos, 0.05); // 0.05 = tốc độ lerp, tăng lên sẽ nhanh hơn
+                if (camera.position.distanceTo(cameraTargetPos) < 0.1) {
+                    camera.position.copy(cameraTargetPos);
+                    isCameraMoving = false;
+                }
+                controls.target.set(0, 0, 0); // luôn nhìn về gốc
+            }
+
+        });
+
+        window.addEventListener("mouseup", () => isDraggingMini = false);
+
+        // Animate
+        function tick(dt) {
+            requestAnimationFrame(tick);
+            const delta = dt ? dt * 0.001 : 0;
+            time += delta;
+
+            if (params.flow) updateHeights(time);
+            if (params.autoRotate) terrain.rotation.y += 0.05 * delta;
+
+            // hiệu ứng mưa
+            if (params.rain && rain.rainGroup) {
+                const pos = rain.rainGroup.geometry.attributes.position;
+                for (let i = 0; i < pos.count; i++) {
+                    let y = pos.getY(i);
+                    y -= 200 * delta; // tốc độ rơi
+                    if (y < params.waterHeight + 5) {
+                        const x = pos.getX(i);
+                        const z = pos.getZ(i);
+                        createRipple(x, z);
+
+                        y = Math.random() * 400; // reset lên trên
+                    }
+                    pos.setY(i, y);
+                }
+                pos.needsUpdate = true;
+            }
+
+            controls.update();
+            updateRipples(delta);
+
+            renderer.render(scene, camera);
+            drawMinimap();
+        }
+        requestAnimationFrame(tick);
+    </script>
+</body>
+
+</html>
